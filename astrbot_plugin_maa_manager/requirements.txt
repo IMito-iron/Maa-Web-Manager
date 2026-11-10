@@ -1,0 +1,1 @@
+# 本插件只使用 Python 标准库（urllib / asyncio / zoneinfo），无需额外依赖。

@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "transport": "usb",
+  "serial": "REPLACE_WITH_SERIAL_FROM_adb_devices",
+  "packageName": "com.hypergryph.arknights",
+  "display": {"width":1280,"height":720,"naturalOrientation":"auto","density":240,"dark":true,"brightness":0,"reassertMs":30000}
+}

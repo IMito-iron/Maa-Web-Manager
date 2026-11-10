@@ -1,0 +1,155 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "sqlite"
+  url = env("DATABASE_URL")
+}
+model Run {
+  id String @id @default(uuid())
+  task String
+  hash String
+  snapshot String
+  status String
+  source String
+  scheduleId String?
+  occurrence String? @unique
+  createdAt DateTime @default(now())
+  startedAt DateTime?
+  finishedAt DateTime?
+  exitCode Int?
+  reason String?
+  pid Int?
+  ownerId String?
+  managedTaskId String?
+  /// WIN-PARITY: run-only tri-state options, JSON keyed by task index (manual runs only)
+  overrides String?
+  @@index([status, createdAt])
+}
+
+model ManagedRun {
+  id String @id @default(uuid())
+  ownerId String
+  taskId String
+  taskName String
+  snapshot String
+  status String @default("queued")
+  source String
+  occurrence String? @unique
+  cancelRequested Boolean @default(false)
+  delivered Boolean @default(false)
+  reason String?
+  createdAt DateTime @default(now())
+  startedAt DateTime?
+  finishedAt DateTime?
+  @@index([ownerId, createdAt])
+  @@index([status])
+}
+
+model ManagedSchedule {
+  id String @id @default(uuid())
+  ownerId String
+  taskId String
+  name String
+  type String
+  expression String
+  enabled Boolean @default(true)
+  nextAt DateTime
+  createdAt DateTime @default(now())
+  @@index([ownerId])
+}
+
+model RunCancellation {
+  id String @id
+  ownerId String
+  createdAt DateTime @default(now())
+}
+model Schedule {
+  id String @id @default(uuid())
+  name String
+  task String
+  type String
+  expression String
+  enabled Boolean @default(true)
+  nextAt DateTime
+  createdAt DateTime @default(now())
+}
+model Setting {
+  key String @id
+  value String
+}
+
+model User {
+  id String @id @default(uuid())
+  username String @unique
+  passwordHash String
+  role String @default("member")
+  disabled Boolean @default(false)
+  createdAt DateTime @default(now())
+  sessions Session[]
+}
+
+model Session {
+  digest String @id
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  csrf String
+  createdAt DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt DateTime
+  @@index([userId])
+}
+
+model Invitation {
+  digest String @id
+  expiresAt DateTime
+  createdBy String
+  usedAt DateTime?
+}
+
+model AuditEvent {
+  id String @id @default(uuid())
+  actorId String?
+  action String
+  targetId String?
+  createdAt DateTime @default(now())
+  @@index([createdAt])
+}
+
+model GameAccount {
+  id String @id @default(uuid())
+  ownerId String
+  label String
+  matcher String @unique
+  verified Boolean @default(false)
+  createdAt DateTime @default(now())
+  tasks ManagedTask[]
+  @@index([ownerId])
+}
+
+model ManagedTask {
+  id String @id @default(uuid())
+  ownerId String
+  accountId String
+  account GameAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  name String
+  raw String
+  version String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([ownerId])
+}
+
+model DeviceLease {
+  id String @id @default(uuid())
+  ownerId String
+  kind String
+  status String @default("active")
+  startedAt DateTime @default(now())
+  expiresAt DateTime
+  lastSeenAt DateTime @default(now())
+  revokedBy String?
+  revokedAt DateTime?
+  @@index([ownerId])
+  @@index([status, expiresAt])
+}

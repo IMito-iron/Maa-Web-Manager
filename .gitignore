@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+data/
+backups/
+vendor/
+*.log
+*.db*
+.runtime/
+coverage/
+.dsh-acl-recovery/
+
+/config/devices.json
+.cache/
+__pycache__/
+.pytest_cache/

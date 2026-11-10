@@ -1,0 +1,109 @@
+{
+  "generatedAt": "2026-11-06T22:40:00+09:00",
+  "databaseReadAt": "2026-11-06T22:40:00+09:00",
+  "timeZone": "Asia/Tokyo",
+  "accountPolicy": "warn-continue",
+  "date": "2026-11-06",
+  "dayWindow": {"start": "2026-11-06T00:00:00+09:00", "end": "2026-11-07T00:00:00+09:00"},
+  "freshness": {"dataUpdatedAt": "2026-11-06T19:16:07+09:00", "ageSeconds": 11783, "staleAfterSeconds": 300, "stale": true},
+  "summary": {
+    "presets": 5,
+    "schedules": {"total": 5, "enabled": 1, "disabled": 4},
+    "runs": {
+      "total": 3,
+      "carriedIn": 0,
+      "bySource": {"manual": 0, "schedule": 3, "sanity-retry": 0, "other": 0},
+      "byOutcome": {"success": 1, "success_unconfirmed": 1, "queued": 0, "running": 0, "failed": 1, "cancelled": 0, "skipped": 0, "interrupted": 0, "unknown": 0},
+      "manual": 0,
+      "scheduled": 3,
+      "sanityRetry": 0
+    },
+    "current": {"queuePaused": false, "queueBlocked": false, "running": false, "task": null, "runId": null}
+  },
+  "presets": [
+    {
+      "task": "preset-demo02",
+      "displayName": "日常 账号A",
+      "unreadable": false,
+      "accountSwitchConfigured": true,
+      "identityConfirmation": "unavailable",
+      "plan": [
+        {"at": "2026-11-06T07:00:00+09:00", "scheduleId": "sched-a01", "scheduleName": "账号A 日常", "type": "cron", "expression": "0 7,19 * * *", "state": "executed", "runId": "run-fail-1", "runOutcome": "failed", "additionalRuns": 0},
+        {"at": "2026-11-06T19:00:00+09:00", "scheduleId": "sched-a01", "scheduleName": "账号A 日常", "type": "cron", "expression": "0 7,19 * * *", "state": "executed", "runId": "run-unconfirmed-1", "runOutcome": "success_unconfirmed", "additionalRuns": 0}
+      ],
+      "schedules": [
+        {"id": "sched-a01", "name": "账号A 日常", "type": "cron", "expression": "0 7,19 * * *", "enabled": true, "nextAt": "2026-11-07T07:00:00+09:00", "nextScheduledAt": "2026-11-07T07:00:00+09:00"}
+      ],
+      "runs": {
+        "total": 2,
+        "items": [
+          {"id": "run-fail-1", "task": "preset-demo02", "source": "schedule", "status": "failed", "outcome": "failed", "completionConfidence": "unavailable", "createdAt": "2026-11-06T07:00:00+09:00", "startedAt": "2026-11-06T07:00:01+09:00", "finishedAt": "2026-11-06T07:15:25+09:00", "exitCode": 1, "durationSeconds": 924, "reason": "失败时前台应用：com.hypergryph.arknights token=abcdef", "crossMidnight": false},
+          {"id": "run-unconfirmed-1", "task": "preset-demo02", "source": "schedule", "status": "success", "outcome": "success_unconfirmed", "completionConfidence": "unavailable", "createdAt": "2026-11-06T19:00:00+09:00", "startedAt": "2026-11-06T19:00:00+09:00", "finishedAt": "2026-11-06T19:10:00+09:00", "exitCode": 0, "durationSeconds": 600, "reason": "任务链完成但身份未确认 /data/manager/run.log", "crossMidnight": false}
+        ],
+        "byOutcome": {"success": 0, "success_unconfirmed": 1, "queued": 0, "running": 0, "failed": 1, "cancelled": 0, "skipped": 0, "interrupted": 0, "unknown": 0},
+        "bySource": {"manual": 0, "schedule": 2, "sanity-retry": 0, "other": 0},
+        "manual": {"count": 0},
+        "scheduled": {"count": 2},
+        "sanityRetry": {"count": 0},
+        "other": {"count": 0}
+      },
+      "carriedIn": {"count": 0, "items": []},
+      "current": {"queuePaused": false, "queueBlocked": false, "running": false, "runId": null, "status": null, "queuedCount": 0},
+      "nextScheduledAt": "2026-11-07T07:00:00+09:00"
+    },
+    {
+      "task": "preset-demo03",
+      "displayName": "日常 账号B",
+      "unreadable": false,
+      "accountSwitchConfigured": true,
+      "identityConfirmation": "unavailable",
+      "plan": [],
+      "schedules": [{"id": "sched-b02", "name": "账号B 日常", "type": "cron", "expression": "0 10,22 * * *", "enabled": false, "nextAt": "2026-11-01T22:00:00+09:00", "nextScheduledAt": null}],
+      "runs": {"total": 0, "items": [], "byOutcome": {"success": 0, "success_unconfirmed": 0, "queued": 0, "running": 0, "failed": 0, "cancelled": 0, "skipped": 0, "interrupted": 0, "unknown": 0}, "bySource": {}, "manual": {"count": 0}, "scheduled": {"count": 0}, "sanityRetry": {"count": 0}, "other": {"count": 0}},
+      "carriedIn": {"count": 0, "items": []},
+      "current": {"queuePaused": false, "queueBlocked": false, "running": false, "runId": null, "status": null, "queuedCount": 0},
+      "nextScheduledAt": null
+    },
+    {
+      "task": "preset-demo04",
+      "displayName": "日常 账号C",
+      "unreadable": false,
+      "accountSwitchConfigured": true,
+      "identityConfirmation": "unavailable",
+      "plan": [],
+      "schedules": [{"id": "sched-c03", "name": "账号C 日常", "type": "cron", "expression": "0 6,18 * * *", "enabled": false, "nextAt": "2026-11-01T18:00:00+09:00", "nextScheduledAt": null}],
+      "runs": {"total": 1, "items": [{"id": "run-ok-1", "task": "preset-demo04", "source": "manual", "status": "success", "outcome": "success", "completionConfidence": "unavailable", "createdAt": "2026-11-06T12:00:00+09:00", "startedAt": "2026-11-06T12:00:00+09:00", "finishedAt": "2026-11-06T12:20:00+09:00", "exitCode": 0, "durationSeconds": 1200, "reason": null, "crossMidnight": false}], "byOutcome": {"success": 1, "success_unconfirmed": 0, "queued": 0, "running": 0, "failed": 0, "cancelled": 0, "skipped": 0, "interrupted": 0, "unknown": 0}, "bySource": {"manual": 1}, "manual": {"count": 1}, "scheduled": {"count": 0}, "sanityRetry": {"count": 0}, "other": {"count": 0}},
+      "carriedIn": {"count": 0, "items": []},
+      "current": {"queuePaused": false, "queueBlocked": false, "running": false, "runId": null, "status": null, "queuedCount": 0},
+      "nextScheduledAt": null
+    },
+    {
+      "task": "preset-demo06",
+      "displayName": "日常 账号D",
+      "unreadable": false,
+      "accountSwitchConfigured": true,
+      "identityConfirmation": "unavailable",
+      "plan": [],
+      "schedules": [{"id": "sched-d04", "name": "账号D 日常", "type": "cron", "expression": "0 8,20 * * *", "enabled": false, "nextAt": "2026-11-01T20:00:00+09:00", "nextScheduledAt": null}],
+      "runs": {"total": 0, "items": [], "byOutcome": {"success": 0, "success_unconfirmed": 0, "queued": 0, "running": 0, "failed": 0, "cancelled": 0, "skipped": 0, "interrupted": 0, "unknown": 0}, "bySource": {}, "manual": {"count": 0}, "scheduled": {"count": 0}, "sanityRetry": {"count": 0}, "other": {"count": 0}},
+      "carriedIn": {"count": 0, "items": []},
+      "current": {"queuePaused": false, "queueBlocked": false, "running": false, "runId": null, "status": null, "queuedCount": 0},
+      "nextScheduledAt": null
+    },
+    {
+      "task": "preset-demo05",
+      "displayName": "日常 账号E",
+      "unreadable": true,
+      "accountSwitchConfigured": false,
+      "identityConfirmation": "unavailable",
+      "plan": [],
+      "schedules": [],
+      "runs": {"total": 0, "items": [], "byOutcome": {"success": 0, "success_unconfirmed": 0, "queued": 0, "running": 0, "failed": 0, "cancelled": 0, "skipped": 0, "interrupted": 0, "unknown": 0}, "bySource": {}, "manual": {"count": 0}, "scheduled": {"count": 0}, "sanityRetry": {"count": 0}, "other": {"count": 0}},
+      "carriedIn": {"count": 0, "items": []},
+      "current": {"queuePaused": false, "queueBlocked": false, "running": false, "runId": null, "status": null, "queuedCount": 0},
+      "nextScheduledAt": null
+    }
+  ],
+  "dataQuality": {"empty": false, "truncated": false, "unreadablePresets": ["preset-demo05"]},
+  "warnings": [{"code": "account_identity_unverified_compat", "task": "preset-demo02"}]
+}

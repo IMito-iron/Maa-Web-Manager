@@ -1,0 +1,32 @@
+{
+  "StageResource": {
+    "roi": [400, 600, 202, 120]
+  },
+  "GoTerminalStopflag": {
+    "roi": [400, 600, 202, 120]
+  },
+  "Roguelike@IntegratedStrategies": {
+    "roi": [760, 606, 270, 114]
+  },
+  "Annihilation": {
+    "next": ["#self", "UsePrts-AnnihilationSuccessCheck", "UsePrts-AnnihilationCheck", "UsePrtsSuccessCheck", "ManagerAnnihilationUsePrtsCheck", "Annihilation@UnableToAgent2"]
+  },
+  "ManagerReturnHome": {
+    "algorithm": "JustReturn",
+    "next": ["Home", "(Home)@QuickSwitch@ToHome#next", "ManagerCloseGuide"]
+  },
+  "ManagerCloseGuide": {
+    "algorithm": "OcrDetect",
+    "text": ["关闭"],
+    "roi": [0, 0, 300, 180],
+    "action": "ClickSelf",
+    "next": ["ManagerReturnHome"]
+  },
+  "ManagerAnnihilationUsePrtsCheck": {
+    "baseTask": "UsePrts",
+    "template": "UsePrts.png",
+    "action": "DoNothing",
+    "next": [],
+    "exceededNext": []
+  }
+}

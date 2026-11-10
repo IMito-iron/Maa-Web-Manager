@@ -1,0 +1,5 @@
+{
+  "platform": "linux-x86_64",
+  "cli": {"version":"0.7.8","url":"https://github.com/MaaAssistantArknights/maa-cli/releases/download/v0.7.8/maa_cli-v0.7.8-x86_64-unknown-linux-gnu.tar.gz","sha256":"8ac10686a36bd227cd7b2f2625652cb8bbcf2b9ea001fc88d788030fedb05fbf"},
+  "core": {"version":"6.21.4","url":"https://github.com/MaaAssistantArknights/MaaAssistantArknights/releases/download/v6.21.4/MAA-v6.21.4-linux-x86_64.tar.gz","sha256":"2eeac054e72c415696aeb4b2a43ce6913407aab930862144d19fccb7df10503f"}
+}

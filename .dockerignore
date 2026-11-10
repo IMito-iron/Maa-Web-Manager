@@ -1,0 +1,9 @@
+.git
+node_modules
+**/node_modules
+**/dist
+data
+backups
+.env
+vendor/display*
+apps/media/tools/**/out

@@ -1,0 +1,6 @@
+name: astrbot_plugin_maa_manager
+display_name: MAA Web Manager
+desc: 查询 MAA Manager 每日状态、定时推送日报，并在受控确认后执行排队/暂停/恢复/取消
+version: v1.0.0
+author: IMito
+support_platforms: []

@@ -1,0 +1,179 @@
+name: maa-manager
+services:
+  android:
+    image: redroid/redroid@sha256:52332b2d74f337982d5ac281a8020ec297fb1ea05cbdcdaaa9c19a2065ae1adc
+    profiles: ["redroid"]
+    privileged: true
+    restart: unless-stopped
+    security_opt: ["label=disable"]
+    command: ["androidboot.redroid_width=1920", "androidboot.redroid_height=1080", "androidboot.redroid_dpi=320", "androidboot.redroid_gpu_mode=host", "androidboot.redroid_fps=30"]
+    volumes: ["${DATA_ROOT:-./data}/android:/data"]
+    networks: [runtime]
+    logging: &logging
+      driver: json-file
+      options: {max-size: "5m", max-file: "3"}
+  device:
+    build: {context: ., dockerfile: docker/device.Dockerfile}
+    init: true
+    restart: unless-stopped
+    environment: {DEVICE_CONFIG: /device-config/devices.json, DISPLAY: ":99", HOME: /root}
+    # Host-neutral by default: a network ADB device (transport "tcp") needs nothing from the host.
+    # A USB phone additionally needs compose.usb.yaml (USB bus, device cgroup rule, host groups).
+    # Lets a network ADB address name the Docker host itself (an emulator on the same machine).
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - ./config:/device-config:ro
+      - ${ADB_KEY_DIR:-./data/adb-keys}:/root/.android
+      - ${DATA_ROOT:-./data}/display-stats:/stats
+      - ${DATA_ROOT:-./data}/control-state:/control-state:ro
+    networks: [runtime]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    shm_size: 256m
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:6080/vnc.html]
+      interval: 15s
+      timeout: 5s
+      start_period: 180s
+    logging: *logging
+  manager:
+    build: {context: ., dockerfile: docker/manager.Dockerfile}
+    init: true
+    restart: unless-stopped
+    user: "1000:1000"
+    stop_grace_period: 25s
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN in .env}
+      DATABASE_URL: file:/data/manager.db
+      DATA_DIR: /data
+      MAA_CONFIG_DIR: /config
+      MAA_DATA_DIR: /opt/maa/share
+      XDG_DATA_HOME: /opt/maa/xdg
+      XDG_CACHE_HOME: /data/cache
+      XDG_STATE_HOME: /data/state
+      HOME: /home/manager
+      DEVICE_CONFIG: /device-config/devices.json
+      ADB_SERVER_SOCKET: tcp:device:5037
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-30}
+      LOG_LIMIT_BYTES: ${LOG_LIMIT_BYTES:-10485760}
+      SANITY_FALLBACK_STAGE: ${SANITY_FALLBACK_STAGE:-LS-6}
+      # Wall-clock zone for schedules and every time the console shows (IANA name).
+      MANAGER_TIME_ZONE: ${MANAGER_TIME_ZONE:-Asia/Shanghai}
+      TZ: ${MANAGER_TIME_ZONE:-Asia/Shanghai}
+      RUNNER_SOCKET: /control/control.sock
+      RUNNER_SOCKET_ONLY: "1"
+      # Read-only Bot API (/api/v1/public/*). Empty token => endpoints answer 503 (fail closed).
+      # Provision BOT_DAILY_API_TOKEN (or a mounted BOT_DAILY_API_TOKEN_FILE) in the host .env.
+      BOT_DAILY_API_TOKEN: ${BOT_DAILY_API_TOKEN:-}
+      BOT_DAILY_API_TOKEN_FILE: ${BOT_DAILY_API_TOKEN_FILE:-}
+      BOT_DAILY_MAX_LOOKBACK_DAYS: ${BOT_DAILY_MAX_LOOKBACK_DAYS:-7}
+      BOT_DAILY_STALE_AFTER_SECONDS: ${BOT_DAILY_STALE_AFTER_SECONDS:-300}
+      BOT_DAILY_RATE_LIMIT_PER_MINUTE: ${BOT_DAILY_RATE_LIMIT_PER_MINUTE:-60}
+      BOT_DAILY_RATE_LIMIT_GLOBAL_PER_MINUTE: ${BOT_DAILY_RATE_LIMIT_GLOBAL_PER_MINUTE:-300}
+      # Account presets: require-verified (default, block when identity cannot be verified) or the
+      # explicitly labelled compatibility mode warn-continue (continue, record and surface the risk).
+      ACCOUNT_IDENTITY_POLICY: ${ACCOUNT_IDENTITY_POLICY:-require-verified}
+    volumes:
+      - ./config:/device-config:ro
+      - ${DATA_ROOT:-./data}/manager:/data
+      - ${DATA_ROOT:-./data}/control:/control
+      - ${DATA_ROOT:-./data}/config:/config
+      - ${DATA_ROOT:-./data}/hot-update:/opt/maa/share/MaaResource
+      - ${DATA_ROOT:-./data}/display-stats:/stats:ro
+      - ${DATA_ROOT:-./data}/control-state:/control-state
+    networks: [runtime]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    depends_on: [device]
+    healthcheck:
+      test: [CMD, maa-managerctl, status]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+    logging: *logging
+  portal:
+    build: {context: ., dockerfile: docker/portal.Dockerfile}
+    init: true
+    user: "1000:1000"
+    restart: unless-stopped
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN in .env}
+      DATABASE_URL: file:/data/portal.db
+      RUNNER_SOCKET: /control/control.sock
+      DEVICE_URL: http://display-proxy:8080
+      MEDIA_URL: http://media:8090
+    volumes:
+      - ${DATA_ROOT:-./data}/portal:/data
+      - ${DATA_ROOT:-./data}/control:/control:ro
+    networks: [frontend, display]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    depends_on: [manager, display-proxy]
+    logging: *logging
+  # Low-latency Android stream (r3-stream1): scrcpy-server H.264 per frame-rate tier, fanned out
+  # over WebRTC (ICE on MEDIA_ICE_PORT udp/tcp) with an H.264-over-WebSocket fallback through the
+  # Portal. Uses the device container's ADB server; never owns USB. noVNC stays as 兼容模式.
+  media:
+    build: {context: ., dockerfile: docker/media.Dockerfile}
+    init: true
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN in .env}
+      MEDIA_ADB: device:5037
+      DEVICE_CONFIG: /device-config/devices.json
+      RUNNER_SOCKET: /control/control.sock
+      CONTROL_STATE: /control-state/control.json
+      MEDIA_UDP_PORT: ${MEDIA_ICE_PORT:-8189}
+      MEDIA_TCP_PORT: ${MEDIA_ICE_PORT:-8189}
+      MEDIA_HOST_IPS: ${MEDIA_HOST_IPS:-}
+      MEDIA_PUBLIC_IPS: ${MEDIA_PUBLIC_IPS:-auto}
+      MEDIA_IDLE_STOP_SEC: ${MEDIA_IDLE_STOP_SEC:-15}
+      TZ: ${MANAGER_TIME_ZONE:-Asia/Shanghai}
+    ports: ["${MEDIA_ICE_PORT:-8189}:${MEDIA_ICE_PORT:-8189}/udp", "${MEDIA_ICE_PORT:-8189}:${MEDIA_ICE_PORT:-8189}/tcp"]
+    volumes:
+      - ./config:/device-config:ro
+      - ${DATA_ROOT:-./data}/control:/control:ro
+      - ${DATA_ROOT:-./data}/control-state:/control-state:ro
+    networks: [runtime, display]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    depends_on: [device]
+    logging: *logging
+  display-proxy:
+    image: nginx:stable-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    user: "1000:1000"
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:uid=1000,gid=1000", "/var/cache/nginx:uid=1000,gid=1000", "/var/run:uid=1000,gid=1000"]
+    volumes: ["./docker/display-proxy.conf:/etc/nginx/nginx.conf:ro"]
+    networks: [runtime, display]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    depends_on: [device]
+    logging: *logging
+  gateway:
+    image: nginx:stable-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    user: "1000:1000"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:uid=1000,gid=1000
+      - /var/cache/nginx:uid=1000,gid=1000
+      - /var/run:uid=1000,gid=1000
+    volumes: ["./docker/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    # The console has no accounts of its own: everyone who reaches this port controls the phone.
+    # It is published on loopback only; put an authenticating reverse proxy in front of it
+    # (compose.proxy.yaml joins an existing Nginx Proxy Manager network instead).
+    ports: ["${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8080}:8080"]
+    networks: [frontend]
+    depends_on: [portal]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    logging: *logging
+networks:
+  display:
+    internal: true
+  runtime:
+  frontend:

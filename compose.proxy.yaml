@@ -1,0 +1,18 @@
+# Reverse-proxy overlay: attach the gateway to an existing Docker network shared with a
+# reverse proxy such as Nginx Proxy Manager, instead of publishing a host port.
+#
+#   COMPOSE_FILE=compose.yaml:compose.proxy.yaml   (add :compose.usb.yaml for a USB phone)
+#
+# Point the proxy at http://maa-manager-gateway:8080 with WebSocket support and an access list:
+# the console has no accounts of its own.
+services:
+  gateway:
+    ports: !reset []
+    networks:
+      frontend:
+      proxy:
+        aliases: [maa-manager-gateway]
+networks:
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:-proxy}

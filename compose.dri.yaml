@@ -1,0 +1,10 @@
+# Optional: expose the host GPU render nodes to the device container.
+#
+# The mirror decodes in software under Xvfb (see docker/device.Dockerfile), so this is not needed
+# for a working setup. Some hosts were deployed with it; keep it only if you rely on it.
+#
+#   COMPOSE_FILE=compose.yaml:compose.usb.yaml:compose.dri.yaml
+services:
+  device:
+    group_add: ["${VIDEO_GID:-44}", "${RENDER_GID:-990}"]
+    devices: ["/dev/dri:/dev/dri"]

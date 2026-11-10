@@ -1,0 +1,5 @@
+{
+  "name": "maa-web-manager", "private": true, "version": "0.1.0",
+  "workspaces": ["apps/*"],
+  "scripts": {"build": "npm run build -w @maa/web && npm run build -w @maa/server", "test": "npm run test -w @maa/server && npm run test -w @maa/web", "generate": "npm run generate -w @maa/server"}
+}

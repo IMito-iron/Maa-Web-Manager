@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "transport": "tcp",
+  "address": "host.docker.internal:5555",
+  "packageName": "com.hypergryph.arknights",
+  "display": {"width":1280,"height":720,"naturalOrientation":"landscape","density":240,"dark":false,"brightness":0,"reassertMs":30000}
+}

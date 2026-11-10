@@ -1,0 +1,17 @@
+# USB phone overlay (device config "transport": "usb").
+#
+#   COMPOSE_FILE=compose.yaml:compose.usb.yaml   (in .env)
+#
+# Gives the device container — and only it — the host USB bus, so its ADB server owns the phone.
+# Stop any host `adb` server first (scripts/install-adb-guard.sh keeps one from coming back),
+# otherwise it claims the phone before the container can.
+services:
+  device:
+    # Host groups allowed to open USB device nodes (Debian/Ubuntu: plugdev=46). Check with
+    # `getent group plugdev` and set USB_GID in .env when your distribution differs.
+    group_add: ["${USB_GID:-46}"]
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+    # 189 = USB character devices; replugging creates new nodes, so a cgroup rule (not a fixed
+    # device list) keeps a replugged phone reachable without restarting the container.
+    device_cgroup_rules: ["c 189:* rmw"]

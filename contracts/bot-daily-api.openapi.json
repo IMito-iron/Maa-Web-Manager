@@ -1,0 +1,1941 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MAA Web Manager — Bot 只读每日状态 API",
+    "version": "1.0.0",
+    "summary": "供外部 Bot 只读查询当日任务计划与执行结果；不提供任何写操作。",
+    "description": "本契约由 `apps/server/src/public-api/` 的实现生成/校验，描述 Manager 进程内注册的两个只读端点。生产拓扑：Bot → NPM（外部鉴权，需放行精确路径）→ gateway(nginx) → portal:3000 → Manager `/control/control.sock`（mode 0600，Manager 无 TCP 监听）。\n\n通用约束：\n- 认证：`Authorization: Bearer <token>`；缺失或错误统一 401（不返回 403）。\n- 仅允许 `GET` 与 `HEAD`；其他方法返回 405 且带 `Allow: GET, HEAD`。\n- 所有响应 `Cache-Control: no-store`、`Pragma: no-cache`、`X-Content-Type-Options: nosniff`；不发送任何 CORS 头。\n- 时间一律为带 `+09:00` 偏移的 ISO-8601 字符串，时区固定 `Asia/Tokyo`。\n- 错误体固定为 `{\"error\":{\"code\":\"...\",\"message\":\"...\"}}`，不包含路径、堆栈、SQL、环境变量名或 token。\n- 只读：服务端只执行一次 Prisma 读事务（schedule + run）并通过 Store 只读预设文件，不存在写库路径。",
+    "contact": {
+      "name": "MAA Web Manager maintainers"
+    },
+    "license": {
+      "name": "Proprietary"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://{PUBLIC_ORIGIN}",
+      "description": "经 NPM → gateway → portal 的公开入口；`/api/v1/public/*` 需在 NPM Access List 中豁免（外部部署步骤，未在本轮执行）。",
+      "variables": {
+        "PUBLIC_ORIGIN": {
+          "default": "maa.example.com",
+          "description": "生产对外域名（HTTPS，NPM 终结 TLS）。"
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "public",
+      "description": "只读公开端点（独立 Bearer Token，非 NPM 登录态）"
+    }
+  ],
+  "paths": {
+    "/api/v1/public/health": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "getBotHealth",
+        "summary": "只读健康检查（需 Bearer Token）",
+        "description": "不读数据库、不读文件、不触发引擎动作。返回服务身份、API 版本与进程运行时长，供 Bot 探测链路可用性。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "服务可用且 token 有效。",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "Pragma": {
+                "$ref": "#/components/headers/NoCache"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                },
+                "example": {
+                  "ok": true,
+                  "service": "maa-manager",
+                  "apiVersion": "v1",
+                  "readOnly": true,
+                  "timeZone": "Asia/Tokyo",
+                  "generatedAt": "2026-11-06T20:30:00.000+09:00",
+                  "uptimeSeconds": 84600
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/NotConfigured"
+          },
+          "504": {
+            "$ref": "#/components/responses/GatewayTimeout"
+          }
+        }
+      },
+      "head": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "headBotHealth",
+        "summary": "HEAD 健康检查（与 GET 相同状态码与响应头，无响应体）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "同 GET /api/v1/public/health 的状态码与响应头。"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/NotConfigured"
+          },
+          "504": {
+            "$ref": "#/components/responses/GatewayTimeout"
+          }
+        }
+      }
+    },
+    "/api/v1/public/daily-status": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "getBotDailyStatus",
+        "summary": "指定 Asia/Tokyo 日历日的计划 + 实际执行只读快照",
+        "description": "默认日期为 Asia/Tokyo 的今天；允许范围 `[today-7, today]`（`BOT_DAILY_MAX_LOOKBACK_DAYS` 可调但不超过 31）。非法格式返回 `invalid_date`；未来或过旧日期返回 `date_out_of_range`（绝不静默截断）。\n\n`plan` 是由 schedule（daily `HH:mm`、weekly `d H:mm`、5 段 cron、interval 分钟）按 Asia/Tokyo 展开的当日计划：过去且有匹配 `Run.occurrence` 记录为 `executed`，过去且无记录为 `missed`，未来一律 `pending`（即使数据库存在异常行也不得报告为已完成）。\n\n`runs` 是实际 `Run` 行，按当日有效开始时间（`startedAt ?? createdAt`）归属；跨午夜运行带 `crossMidnight=true`；开始于窗口之前、仍在窗口内运行或结束的运行只出现在 `carriedIn`，不进入当日 manual/scheduled 统计。`source` 仅 `manual` / `schedule` / `sanity-retry` 三类（其他值归 `other` 并告警），`sanity-retry` 不计入 manual 或 scheduled。\n\n`success` 在 `reason` 表示未确认/未完成时降级为 `success_unconfirmed`，`completionConfidence=unconfirmed`、`subtasksConfirmed=false`；退出码 0 从不被当作完整子任务成功。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "date",
+            "in": "query",
+            "required": false,
+            "description": "Asia/Tokyo 日历日。省略=今天；允许 `[今天-7, 今天]`；未来或更早返回 400 `date_out_of_range`。",
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "example": "2026-11-06"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "只读快照。空库也是合法 200（零值 + 空数组 + `dataQuality.empty=true`、`freshness.dataUpdatedAt=null`）。",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "Pragma": {
+                "$ref": "#/components/headers/NoCache"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyStatus"
+                },
+                "examples": {
+                  "withRuns": {
+                    "summary": "有执行记录的一天（JST）",
+                    "value": {
+                      "generatedAt": "2026-11-06T20:30:00.000+09:00",
+                      "timeZone": "Asia/Tokyo",
+                      "date": "2026-11-06",
+                      "dayWindow": {
+                        "start": "2026-11-06T00:00:00.000+09:00",
+                        "end": "2026-11-07T00:00:00.000+09:00"
+                      },
+                      "databaseReadAt": "2026-11-06T20:30:00.000+09:00",
+                      "freshness": {
+                        "dataUpdatedAt": "2026-11-06T20:22:03.000+09:00",
+                        "ageSeconds": 477,
+                        "staleAfterSeconds": 300,
+                        "stale": true
+                      },
+                      "summary": {
+                        "presets": 2,
+                        "schedules": {
+                          "total": 3,
+                          "enabled": 2,
+                          "disabled": 1
+                        },
+                        "runs": {
+                          "total": 4,
+                          "carriedIn": 1,
+                          "bySource": {
+                            "manual": 2,
+                            "schedule": 2,
+                            "sanity-retry": 0,
+                            "other": 0
+                          },
+                          "byOutcome": {
+                            "success": 1,
+                            "success_unconfirmed": 1,
+                            "queued": 0,
+                            "running": 1,
+                            "failed": 1,
+                            "cancelled": 0,
+                            "skipped": 0,
+                            "interrupted": 0,
+                            "unknown": 0
+                          },
+                          "manual": 2,
+                          "scheduled": 2,
+                          "sanityRetry": 0
+                        },
+                        "current": {
+                          "queuePaused": false,
+                          "queueBlocked": false,
+                          "running": true,
+                          "task": "preset-daily-event",
+                          "runId": "run-event-live"
+                        }
+                      },
+                      "presets": [
+                        {
+                          "task": "preset-daily-event",
+                          "displayName": "活动刷图",
+                          "unreadable": false,
+                          "accountSwitchConfigured": false,
+                          "identityConfirmation": "unavailable",
+                          "plan": [
+                            {
+                              "at": "2026-11-06T22:00:00.000+09:00",
+                              "scheduleId": "sched-event-2200",
+                              "scheduleName": "活动 22:00",
+                              "type": "daily",
+                              "expression": "22:00",
+                              "state": "pending",
+                              "missedReason": null,
+                              "runId": null,
+                              "runOutcome": null,
+                              "additionalRuns": 0
+                            }
+                          ],
+                          "schedules": [
+                            {
+                              "id": "sched-event-2200",
+                              "name": "活动 22:00",
+                              "type": "daily",
+                              "expression": "22:00",
+                              "enabled": true,
+                              "nextAt": "2026-11-06T22:00:00.000+09:00",
+                              "nextScheduledAt": "2026-11-06T22:00:00.000+09:00"
+                            },
+                            {
+                              "id": "sched-disabled",
+                              "name": "停用 07:00",
+                              "type": "daily",
+                              "expression": "07:00",
+                              "enabled": false,
+                              "nextAt": "2026-11-07T07:00:00.000+09:00",
+                              "nextScheduledAt": null
+                            }
+                          ],
+                          "runs": {
+                            "total": 1,
+                            "items": [
+                              {
+                                "id": "run-event-live",
+                                "task": "preset-daily-event",
+                                "source": "manual",
+                                "status": "running",
+                                "outcome": "running",
+                                "completionConfidence": "unavailable",
+                                "subtasksConfirmed": null,
+                                "createdAt": "2026-11-06T20:22:00.000+09:00",
+                                "startedAt": "2026-11-06T20:22:03.000+09:00",
+                                "finishedAt": null,
+                                "exitCode": null,
+                                "durationSeconds": null,
+                                "reason": null,
+                                "crossMidnight": true,
+                                "occurrence": null
+                              }
+                            ],
+                            "byOutcome": {
+                              "success": 0,
+                              "success_unconfirmed": 0,
+                              "queued": 0,
+                              "running": 1,
+                              "failed": 0,
+                              "cancelled": 0,
+                              "skipped": 0,
+                              "interrupted": 0,
+                              "unknown": 0
+                            },
+                            "bySource": {
+                              "manual": 1,
+                              "schedule": 0,
+                              "sanity-retry": 0,
+                              "other": 0
+                            },
+                            "manual": {
+                              "count": 1,
+                              "byOutcome": {
+                                "success": 0,
+                                "success_unconfirmed": 0,
+                                "queued": 0,
+                                "running": 1,
+                                "failed": 0,
+                                "cancelled": 0,
+                                "skipped": 0,
+                                "interrupted": 0,
+                                "unknown": 0
+                              }
+                            },
+                            "scheduled": {
+                              "count": 0,
+                              "byOutcome": {
+                                "success": 0,
+                                "success_unconfirmed": 0,
+                                "queued": 0,
+                                "running": 0,
+                                "failed": 0,
+                                "cancelled": 0,
+                                "skipped": 0,
+                                "interrupted": 0,
+                                "unknown": 0
+                              }
+                            },
+                            "sanityRetry": {
+                              "count": 0,
+                              "byOutcome": {
+                                "success": 0,
+                                "success_unconfirmed": 0,
+                                "queued": 0,
+                                "running": 0,
+                                "failed": 0,
+                                "cancelled": 0,
+                                "skipped": 0,
+                                "interrupted": 0,
+                                "unknown": 0
+                              }
+                            },
+                            "other": {
+                              "count": 0,
+                              "byOutcome": {
+                                "success": 0,
+                                "success_unconfirmed": 0,
+                                "queued": 0,
+                                "running": 0,
+                                "failed": 0,
+                                "cancelled": 0,
+                                "skipped": 0,
+                                "interrupted": 0,
+                                "unknown": 0
+                              }
+                            }
+                          },
+                          "carriedIn": {
+                            "count": 0,
+                            "items": []
+                          },
+                          "current": {
+                            "queuePaused": false,
+                            "queueBlocked": false,
+                            "running": true,
+                            "runId": "run-event-live",
+                            "status": "running",
+                            "since": "2026-11-06T20:22:03.000+09:00",
+                            "queuedCount": 0
+                          },
+                          "nextScheduledAt": "2026-11-06T22:00:00.000+09:00"
+                        },
+                        {
+                          "task": "preset-daily-main",
+                          "displayName": "日常主号",
+                          "unreadable": false,
+                          "accountSwitchConfigured": true,
+                          "identityConfirmation": "unavailable",
+                          "plan": [
+                            {
+                              "at": "2026-11-06T06:00:00.000+09:00",
+                              "scheduleId": "sched-main-0618",
+                              "scheduleName": "每日 06:00 [path] 18:00",
+                              "type": "cron",
+                              "expression": "0 6,18 * * *",
+                              "state": "executed",
+                              "missedReason": null,
+                              "runId": "run-0618-a",
+                              "runOutcome": "success",
+                              "additionalRuns": 0
+                            },
+                            {
+                              "at": "2026-11-06T18:00:00.000+09:00",
+                              "scheduleId": "sched-main-0618",
+                              "scheduleName": "每日 06:00 [path] 18:00",
+                              "type": "cron",
+                              "expression": "0 6,18 * * *",
+                              "state": "executed",
+                              "missedReason": null,
+                              "runId": "run-0618-b",
+                              "runOutcome": "success_unconfirmed",
+                              "additionalRuns": 0
+                            }
+                          ],
+                          "schedules": [
+                            {
+                              "id": "sched-main-0618",
+                              "name": "每日 06:00 [path] 18:00",
+                              "type": "cron",
+                              "expression": "0 6,18 * * *",
+                              "enabled": true,
+                              "nextAt": "2026-11-07T06:00:00.000+09:00",
+                              "nextScheduledAt": "2026-11-07T06:00:00.000+09:00"
+                            }
+                          ],
+                          "runs": {
+                            "total": 3,
+                            "items": [
+                              {
+                                "id": "run-0618-a",
+                                "task": "preset-daily-main",
+                                "source": "schedule",
+                                "status": "success",
+                                "outcome": "success",
+                                "completionConfidence": "confirmed",
+                                "subtasksConfirmed": true,
+                                "createdAt": "2026-11-06T06:00:01.000+09:00",
+                                "startedAt": "2026-11-06T06:00:02.000+09:00",
+                                "finishedAt": "2026-11-06T06:24:10.000+09:00",
+                                "exitCode": 0,
+                                "durationSeconds": 1448,
+                                "reason": null,
+                                "crossMidnight": false,
+                                "occurrence": "sched-main-0618:2026-11-05T21:00:00.000Z"
+                              },
+                              {
+                                "id": "run-manual-1200",
+                                "task": "preset-daily-main",
+                                "source": "manual",
+                                "status": "failed",
+                                "outcome": "failed",
+                                "completionConfidence": "unavailable",
+                                "subtasksConfirmed": null,
+                                "createdAt": "2026-11-06T12:00:00.000+09:00",
+                                "startedAt": "2026-11-06T12:00:01.000+09:00",
+                                "finishedAt": "2026-11-06T12:01:30.000+09:00",
+                                "exitCode": 1,
+                                "durationSeconds": 89,
+                                "reason": "游戏界面识别失败（示例原因）",
+                                "crossMidnight": false,
+                                "occurrence": null
+                              },
+                              {
+                                "id": "run-0618-b",
+                                "task": "preset-daily-main",
+                                "source": "schedule",
+                                "status": "success",
+                                "outcome": "success_unconfirmed",
+                                "completionConfidence": "unconfirmed",
+                                "subtasksConfirmed": false,
+                                "createdAt": "2026-11-06T18:00:01.000+09:00",
+                                "startedAt": "2026-11-06T18:00:02.000+09:00",
+                                "finishedAt": "2026-11-06T18:07:44.000+09:00",
+                                "exitCode": 0,
+                                "durationSeconds": 462,
+                                "reason": "理智未耗尽：按游戏「上次作战」的关卡没有用尽理智（该记忆会被剿灭作战改写）。",
+                                "crossMidnight": false,
+                                "occurrence": "sched-main-0618:2026-11-06T09:00:00.000Z"
+                              }
+                            ],
+                            "byOutcome": {
+                              "success": 1,
+                              "success_unconfirmed": 1,
+                              "queued": 0,
+                              "running": 0,
+                              "failed": 1,
+                              "cancelled": 0,
+                              "skipped": 0,
+                              "interrupted": 0,
+                              "unknown": 0
+                            },
+                            "bySource": {
+                              "manual": 1,
+                              "schedule": 2,
+                              "sanity-retry": 0,
+                              "other": 0
+                            },
+                            "manual": {
+                              "count": 1,
+                              "byOutcome": {
+                                "success": 0,
+                                "success_unconfirmed": 0,
+                                "queued": 0,
+                                "running": 0,
+                                "failed": 1,
+                                "cancelled": 0,
+                                "skipped": 0,
+                                "interrupted": 0,
+                                "unknown": 0
+                              }
+                            },
+                            "scheduled": {
+                              "count": 2,
+                              "byOutcome": {
+                                "success": 1,
+                                "success_unconfirmed": 1,
+                                "queued": 0,
+                                "running": 0,
+                                "failed": 0,
+                                "cancelled": 0,
+                                "skipped": 0,
+                                "interrupted": 0,
+                                "unknown": 0
+                              }
+                            },
+                            "sanityRetry": {
+                              "count": 0,
+                              "byOutcome": {
+                                "success": 0,
+                                "success_unconfirmed": 0,
+                                "queued": 0,
+                                "running": 0,
+                                "failed": 0,
+                                "cancelled": 0,
+                                "skipped": 0,
+                                "interrupted": 0,
+                                "unknown": 0
+                              }
+                            },
+                            "other": {
+                              "count": 0,
+                              "byOutcome": {
+                                "success": 0,
+                                "success_unconfirmed": 0,
+                                "queued": 0,
+                                "running": 0,
+                                "failed": 0,
+                                "cancelled": 0,
+                                "skipped": 0,
+                                "interrupted": 0,
+                                "unknown": 0
+                              }
+                            }
+                          },
+                          "carriedIn": {
+                            "count": 1,
+                            "items": [
+                              {
+                                "id": "run-carried-in",
+                                "task": "preset-daily-main",
+                                "source": "manual",
+                                "status": "success",
+                                "outcome": "success",
+                                "completionConfidence": "confirmed",
+                                "subtasksConfirmed": true,
+                                "createdAt": "2026-11-05T23:40:00.000+09:00",
+                                "startedAt": "2026-11-05T23:40:05.000+09:00",
+                                "finishedAt": "2026-11-06T00:35:00.000+09:00",
+                                "exitCode": 0,
+                                "durationSeconds": 3295,
+                                "reason": null,
+                                "crossMidnight": true,
+                                "occurrence": null
+                              }
+                            ]
+                          },
+                          "current": {
+                            "queuePaused": false,
+                            "queueBlocked": false,
+                            "running": false,
+                            "runId": null,
+                            "status": null,
+                            "since": null,
+                            "queuedCount": 0
+                          },
+                          "nextScheduledAt": "2026-11-07T06:00:00.000+09:00"
+                        }
+                      ],
+                      "dataQuality": {
+                        "empty": false,
+                        "truncated": false,
+                        "truncatedReasons": [],
+                        "orphanSchedules": [],
+                        "unreadablePresets": [],
+                        "unattributedRuns": {
+                          "day": 0,
+                          "carriedIn": 0
+                        },
+                        "lookbackDays": 7
+                      },
+                      "warnings": []
+                    }
+                  },
+                  "empty": {
+                    "summary": "空库（仍然 200）",
+                    "value": {
+                      "generatedAt": "2026-11-06T20:30:00.000+09:00",
+                      "timeZone": "Asia/Tokyo",
+                      "date": "2026-11-06",
+                      "dayWindow": {
+                        "start": "2026-11-06T00:00:00.000+09:00",
+                        "end": "2026-11-07T00:00:00.000+09:00"
+                      },
+                      "databaseReadAt": "2026-11-06T20:30:00.000+09:00",
+                      "freshness": {
+                        "dataUpdatedAt": null,
+                        "ageSeconds": null,
+                        "staleAfterSeconds": 300,
+                        "stale": false
+                      },
+                      "summary": {
+                        "presets": 0,
+                        "schedules": {
+                          "total": 0,
+                          "enabled": 0,
+                          "disabled": 0
+                        },
+                        "runs": {
+                          "total": 0,
+                          "carriedIn": 0,
+                          "bySource": {
+                            "manual": 0,
+                            "schedule": 0,
+                            "sanity-retry": 0,
+                            "other": 0
+                          },
+                          "byOutcome": {
+                            "success": 0,
+                            "success_unconfirmed": 0,
+                            "queued": 0,
+                            "running": 0,
+                            "failed": 0,
+                            "cancelled": 0,
+                            "skipped": 0,
+                            "interrupted": 0,
+                            "unknown": 0
+                          },
+                          "manual": 0,
+                          "scheduled": 0,
+                          "sanityRetry": 0
+                        },
+                        "current": {
+                          "queuePaused": true,
+                          "queueBlocked": false,
+                          "running": false,
+                          "task": null,
+                          "runId": null
+                        }
+                      },
+                      "presets": [],
+                      "dataQuality": {
+                        "empty": true,
+                        "truncated": false,
+                        "truncatedReasons": [],
+                        "orphanSchedules": [],
+                        "unreadablePresets": [],
+                        "unattributedRuns": {
+                          "day": 0,
+                          "carriedIn": 0
+                        },
+                        "lookbackDays": 7
+                      },
+                      "warnings": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/NotConfigured"
+          },
+          "504": {
+            "$ref": "#/components/responses/GatewayTimeout"
+          }
+        }
+      },
+      "head": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "headBotDailyStatus",
+        "summary": "HEAD 每日状态（与 GET 相同状态码与响应头，无响应体）",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "同 GET /api/v1/public/daily-status 的状态码与响应头。"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/NotConfigured"
+          },
+          "504": {
+            "$ref": "#/components/responses/GatewayTimeout"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Bot 专用 token，与 NPM 登录态、Portal 控制 cookie 完全独立。服务端 `BOT_DAILY_API_TOKEN`（逗号/空格/换行分隔，可多 token 轮换）或 `BOT_DAILY_API_TOKEN_FILE`（启动时读取一次；不可读则 fail-closed → 503）。每次请求使用 SHA-256 摘要常量时间比较，缺失/格式错误/错误 token 一律 401。"
+      }
+    },
+    "headers": {
+      "NoStore": {
+        "description": "固定 `no-store`。",
+        "schema": {
+          "type": "string",
+          "const": "no-store"
+        }
+      },
+      "NoCache": {
+        "description": "固定 `no-cache`。",
+        "schema": {
+          "type": "string",
+          "const": "no-cache"
+        }
+      },
+      "NoSniff": {
+        "description": "固定 `nosniff`。",
+        "schema": {
+          "type": "string",
+          "const": "nosniff"
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "日期参数非法：`invalid_date`（格式错误/不存在的日期）或 `date_out_of_range`（未来/过旧，绝不静默截断）。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "examples": {
+              "invalidFormat": {
+                "value": {
+                  "error": {
+                    "code": "invalid_date",
+                    "message": "Invalid date; expected YYYY-MM-DD"
+                  }
+                }
+              },
+              "outOfRange": {
+                "value": {
+                  "error": {
+                    "code": "date_out_of_range",
+                    "message": "Date is outside the allowed range"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "缺失/格式错误/错误 token 一律 401（固定策略，绝不 403）。",
+        "headers": {
+          "WWW-Authenticate": {
+            "description": "固定 challenge。",
+            "schema": {
+              "type": "string",
+              "const": "Bearer realm=\"bot-daily\""
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "unauthorized",
+                "message": "Missing or invalid bot token"
+              }
+            }
+          }
+        }
+      },
+      "MethodNotAllowed": {
+        "description": "非 GET/HEAD（鉴权前判定）。",
+        "headers": {
+          "Allow": {
+            "description": "固定 `GET, HEAD`。",
+            "schema": {
+              "type": "string",
+              "const": "GET, HEAD"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "method_not_allowed",
+                "message": "Only GET is allowed"
+              }
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "超过每 token（默认 60/min）或全局（默认 300/min）固定窗口上限。",
+        "headers": {
+          "Retry-After": {
+            "description": "距离下一个窗口开始的秒数。",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "rate_limited",
+                "message": "Too many requests"
+              }
+            }
+          }
+        }
+      },
+      "NotConfigured": {
+        "description": "服务端未配置 token（`BOT_DAILY_API_TOKEN` 为空且 token 文件缺失/不可读/为空）——fail closed，两个端点都 503。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "not_configured",
+                "message": "Bot API token is not configured"
+              }
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "未预期内部错误（固定文案，不含路径/堆栈/SQL/环境变量）。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "internal_error",
+                "message": "Internal error"
+              }
+            }
+          }
+        }
+      },
+      "GatewayTimeout": {
+        "description": "由 Portal 网关层返回：Manager 上游 10s 未响应；Manager 自身不会返回该错误。",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "gateway_timeout",
+                "message": "Upstream timeout"
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_date",
+                  "date_out_of_range",
+                  "unauthorized",
+                  "method_not_allowed",
+                  "rate_limited",
+                  "not_configured",
+                  "internal_error",
+                  "gateway_timeout",
+                  "upstream_error"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "service",
+          "apiVersion",
+          "readOnly",
+          "timeZone",
+          "generatedAt",
+          "uptimeSeconds"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true
+          },
+          "service": {
+            "type": "string",
+            "const": "maa-manager"
+          },
+          "apiVersion": {
+            "type": "string",
+            "const": "v1"
+          },
+          "readOnly": {
+            "type": "boolean",
+            "const": true
+          },
+          "timeZone": {
+            "type": "string",
+            "const": "Asia/Tokyo"
+          },
+          "generatedAt": {
+            "$ref": "#/components/schemas/JstTimestamp"
+          },
+          "uptimeSeconds": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "JstTimestamp": {
+        "type": "string",
+        "description": "带 `+09:00` 偏移的 ISO-8601 时间。",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\+09:00$"
+      },
+      "RunOutcome": {
+        "type": "string",
+        "enum": [
+          "success",
+          "success_unconfirmed",
+          "queued",
+          "running",
+          "failed",
+          "cancelled",
+          "skipped",
+          "interrupted",
+          "unknown"
+        ]
+      },
+      "RunSource": {
+        "type": "string",
+        "enum": [
+          "manual",
+          "schedule",
+          "sanity-retry",
+          "other"
+        ]
+      },
+      "OutcomeCounts": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "count",
+          "byOutcome"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "byOutcome": {
+            "$ref": "#/components/schemas/OutcomeMap"
+          }
+        }
+      },
+      "OutcomeMap": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "success",
+          "success_unconfirmed",
+          "queued",
+          "running",
+          "failed",
+          "cancelled",
+          "skipped",
+          "interrupted",
+          "unknown"
+        ],
+        "properties": {
+          "success": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "success_unconfirmed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "queued": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "running": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cancelled": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "interrupted": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unknown": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "SourceMap": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "manual",
+          "schedule",
+          "sanity-retry",
+          "other"
+        ],
+        "properties": {
+          "manual": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "schedule": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sanity-retry": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "other": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RunItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "task",
+          "source",
+          "status",
+          "outcome",
+          "completionConfidence",
+          "subtasksConfirmed",
+          "createdAt",
+          "startedAt",
+          "finishedAt",
+          "exitCode",
+          "durationSeconds",
+          "reason",
+          "crossMidnight",
+          "occurrence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string",
+            "description": "预设文件 id。"
+          },
+          "source": {
+            "$ref": "#/components/schemas/RunSource"
+          },
+          "status": {
+            "type": "string",
+            "description": "数据库原始 status（诊断用）；语义以 outcome 为准。"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/RunOutcome"
+          },
+          "completionConfidence": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "unconfirmed",
+              "unavailable"
+            ]
+          },
+          "subtasksConfirmed": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "仅成功运行有意义；未确认成功为 false，非成功/未知为 null。"
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/JstTimestamp"
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JstTimestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "finishedAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JstTimestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exitCode": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "durationSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "已脱敏、截断（≤240 字符）：不含路径、account_name、snapshot、DATABASE_URL、token。"
+          },
+          "crossMidnight": {
+            "type": "boolean",
+            "description": "当日开始但未结束或结束于窗口之后为 true。"
+          },
+          "occurrence": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "定时触发的 occurrence key：`<scheduleId>:<UTC ISO>`；手动运行为 null。"
+          }
+        }
+      },
+      "PlanOccurrence": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "at",
+          "scheduleId",
+          "scheduleName",
+          "type",
+          "expression",
+          "state",
+          "missedReason",
+          "runId",
+          "runOutcome",
+          "additionalRuns"
+        ],
+        "properties": {
+          "at": {
+            "$ref": "#/components/schemas/JstTimestamp"
+          },
+          "scheduleId": {
+            "type": "string"
+          },
+          "scheduleName": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "daily",
+              "weekly",
+              "cron",
+              "interval"
+            ]
+          },
+          "expression": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "executed",
+              "missed"
+            ],
+            "description": "未来一律 pending；过去且有匹配 Run.occurrence 为 executed；过去且无记录为 missed。"
+          },
+          "missedReason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "queue_paused",
+              "no_run_recorded",
+              null
+            ],
+            "description": "仅在 state=missed 时非 null：查询时队列暂停为 queue_paused，否则 no_run_recorded。"
+          },
+          "runId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "仅 executed 时给出首个匹配运行。"
+          },
+          "runOutcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "additionalRuns": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "同一 occurrence 的额外运行数（executed 只计一次）。"
+          }
+        }
+      },
+      "ScheduleSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "type",
+          "expression",
+          "enabled",
+          "nextAt",
+          "nextScheduledAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "daily",
+              "weekly",
+              "cron",
+              "interval"
+            ]
+          },
+          "expression": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "nextAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JstTimestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "nextScheduledAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JstTimestamp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "启用时为下一次触发；停用为 null。"
+          }
+        }
+      },
+      "PresetDailyStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "task",
+          "displayName",
+          "unreadable",
+          "accountSwitchConfigured",
+          "identityConfirmation",
+          "plan",
+          "schedules",
+          "runs",
+          "carriedIn",
+          "current",
+          "nextScheduledAt"
+        ],
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "预设文件 id（不是运行名，也不含账号信息）。"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "unreadable": {
+            "type": "boolean",
+            "description": "文件存在但读取失败时为 true（仍报告其 schedule/run 数据）。"
+          },
+          "accountSwitchConfigured": {
+            "type": "boolean",
+            "description": "预设是否声明了账号切换（首个 StartUp 的 account_name）；仅为布尔，绝不返回账号名。"
+          },
+          "identityConfirmation": {
+            "type": "string",
+            "enum": [
+              "unavailable",
+              "confirmed",
+              "unconfirmed"
+            ],
+            "description": "当前部署没有可证明“已登录账号”的探针，恒为 unavailable。"
+          },
+          "plan": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanOccurrence"
+            },
+            "description": "当日计划（按 at 升序）；停用 schedule 不产生 occurrence。"
+          },
+          "schedules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScheduleSummary"
+            }
+          },
+          "runs": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "total",
+              "items",
+              "byOutcome",
+              "bySource",
+              "manual",
+              "scheduled",
+              "sanityRetry",
+              "other"
+            ],
+            "properties": {
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RunItem"
+                }
+              },
+              "byOutcome": {
+                "$ref": "#/components/schemas/OutcomeMap"
+              },
+              "bySource": {
+                "$ref": "#/components/schemas/SourceMap"
+              },
+              "manual": {
+                "$ref": "#/components/schemas/OutcomeCounts"
+              },
+              "scheduled": {
+                "$ref": "#/components/schemas/OutcomeCounts"
+              },
+              "sanityRetry": {
+                "$ref": "#/components/schemas/OutcomeCounts"
+              },
+              "other": {
+                "$ref": "#/components/schemas/OutcomeCounts"
+              }
+            }
+          },
+          "carriedIn": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "count",
+              "items"
+            ],
+            "description": "开始于窗口之前、仍在窗口内运行或结束于窗口内的运行；不计入当日 manual/scheduled 统计。",
+            "properties": {
+              "count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RunItem"
+                }
+              }
+            }
+          },
+          "current": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "queuePaused",
+              "queueBlocked",
+              "running",
+              "runId",
+              "status",
+              "since",
+              "queuedCount"
+            ],
+            "properties": {
+              "queuePaused": {
+                "type": "boolean"
+              },
+              "queueBlocked": {
+                "type": "boolean"
+              },
+              "running": {
+                "type": "boolean"
+              },
+              "runId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "since": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/JstTimestamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "queuedCount": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "nextScheduledAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JstTimestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "DataQuality": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "empty",
+          "truncated",
+          "truncatedReasons",
+          "orphanSchedules",
+          "unreadablePresets",
+          "unattributedRuns",
+          "lookbackDays"
+        ],
+        "properties": {
+          "empty": {
+            "type": "boolean",
+            "description": "本次读取未发现任何 preset/schedule/run 行。"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "truncatedReasons": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "row_cap",
+                "plan_cap"
+              ]
+            }
+          },
+          "orphanSchedules": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "scheduleId",
+                "name",
+                "task",
+                "enabled"
+              ],
+              "properties": {
+                "scheduleId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "task": {
+                  "type": "string"
+                },
+                "enabled": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "unreadablePresets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "task",
+                "displayName"
+              ],
+              "properties": {
+                "task": {
+                  "type": "string"
+                },
+                "displayName": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "unattributedRuns": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "day",
+              "carriedIn"
+            ],
+            "properties": {
+              "day": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "carriedIn": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "lookbackDays": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 31
+          }
+        }
+      },
+      "Warning": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "orphan_schedule",
+              "unreadable_preset",
+              "run_without_preset",
+              "unknown_run_source",
+              "invalid_schedule_rule",
+              "result_truncated",
+              "plan_truncated"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string"
+          },
+          "scheduleId": {
+            "type": "string"
+          }
+        }
+      },
+      "DailyStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "generatedAt",
+          "timeZone",
+          "date",
+          "dayWindow",
+          "databaseReadAt",
+          "freshness",
+          "summary",
+          "presets",
+          "dataQuality",
+          "warnings",
+          "accountPolicy"
+        ],
+        "properties": {
+          "generatedAt": {
+            "$ref": "#/components/schemas/JstTimestamp"
+          },
+          "timeZone": {
+            "type": "string",
+            "const": "Asia/Tokyo"
+          },
+          "accountPolicy": {
+            "type": "string",
+            "enum": [
+              "require-verified",
+              "warn-continue"
+            ],
+            "description": "Explicit account identity policy in force. warn-continue is a labelled compatibility mode: a completed StartUp continues without identity verification (the risk is reported, identity is never claimed)."
+          },
+          "date": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "dayWindow": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "start",
+              "end"
+            ],
+            "properties": {
+              "start": {
+                "$ref": "#/components/schemas/JstTimestamp",
+                "description": "包含：date 00:00:00+09:00。"
+              },
+              "end": {
+                "$ref": "#/components/schemas/JstTimestamp",
+                "description": "不包含：next day 00:00:00+09:00。"
+              }
+            }
+          },
+          "databaseReadAt": {
+            "$ref": "#/components/schemas/JstTimestamp",
+            "description": "单次 Prisma 读事务（schedule + run）完成时间。"
+          },
+          "freshness": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "dataUpdatedAt",
+              "ageSeconds",
+              "staleAfterSeconds",
+              "stale"
+            ],
+            "properties": {
+              "dataUpdatedAt": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/JstTimestamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "本次报告运行中 max(createdAt/startedAt/finishedAt)；无运行为 null。"
+              },
+              "ageSeconds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "staleAfterSeconds": {
+                "type": "integer",
+                "minimum": 30
+              },
+              "stale": {
+                "type": "boolean"
+              }
+            }
+          },
+          "summary": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "presets",
+              "schedules",
+              "runs",
+              "current"
+            ],
+            "properties": {
+              "presets": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "schedules": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "total",
+                  "enabled",
+                  "disabled"
+                ],
+                "properties": {
+                  "total": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "enabled": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "disabled": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "runs": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "total",
+                  "carriedIn",
+                  "bySource",
+                  "byOutcome",
+                  "manual",
+                  "scheduled",
+                  "sanityRetry"
+                ],
+                "properties": {
+                  "total": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "carriedIn": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "bySource": {
+                    "$ref": "#/components/schemas/SourceMap"
+                  },
+                  "byOutcome": {
+                    "$ref": "#/components/schemas/OutcomeMap"
+                  },
+                  "manual": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "scheduled": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "sanityRetry": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "current": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "queuePaused",
+                  "queueBlocked",
+                  "running",
+                  "task",
+                  "runId"
+                ],
+                "properties": {
+                  "queuePaused": {
+                    "type": "boolean"
+                  },
+                  "queueBlocked": {
+                    "type": "boolean"
+                  },
+                  "running": {
+                    "type": "boolean"
+                  },
+                  "task": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "runId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "presets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PresetDailyStatus"
+            }
+          },
+          "dataQuality": {
+            "$ref": "#/components/schemas/DataQuality"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Warning"
+            }
+          }
+        }
+      }
+    }
+  }
+}
